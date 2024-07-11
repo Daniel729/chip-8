@@ -70,7 +70,10 @@ impl VirtualMachine {
             canvas: Arc::new(Mutex::new([[CanvasColor::White; WIDTH]; HEIGHT])),
         };
 
+        // Game ROM starts at 0x200
         machine.memory[0x200..(0x200 + rom.len())].copy_from_slice(&rom);
+
+        // Font ROM starts at 0x50
         machine.memory[0x50..0xA0].copy_from_slice(&characters::CHARS);
 
         machine
@@ -84,7 +87,7 @@ impl VirtualMachine {
         self.pressed_key.clone()
     }
 
-    const fn get_memory(&self, address: u16) -> u8 {
+    fn get_memory(&self, address: u16) -> u8 {
         self.memory[address as usize]
     }
 
@@ -92,7 +95,7 @@ impl VirtualMachine {
         self.memory[address as usize] = byte
     }
 
-    const fn get_register(&self, register: u8) -> u8 {
+    fn get_register(&self, register: u8) -> u8 {
         self.registers[register as usize]
     }
 
@@ -102,6 +105,12 @@ impl VirtualMachine {
 
     fn set_flag(&mut self, flag: u8) {
         self.registers[15] = flag;
+    }
+
+    fn update_pc(&mut self, address: u16) {
+        let new_pc = self.get_register(0) as u16 + address;
+        self.pc = new_pc;
+        self.should_increment_pc = false;
     }
 
     fn call(&mut self, address: u16) {
@@ -175,6 +184,7 @@ impl VirtualMachine {
         self.set_register(register, value.wrapping_add(byte));
     }
 
+    /// Source: https://en.wikipedia.org/wiki/CHIP-8#Opcode_table
     pub fn execute_opcode(&mut self) {
         if self.last_decrement.elapsed() > FRAME_TIME {
             if self.sound_timer > 0 {
@@ -219,15 +229,8 @@ impl VirtualMachine {
                 self.skip_if_register(register_x, register_y, Relation::NotEqual);
             }
             0xA => self.i = address,
-            0xB => {
-                let new_pc = self.get_register(0) as u16 + address;
-                self.pc = new_pc;
-                self.should_increment_pc = false;
-            }
-            0xC => {
-                let random_num = fastrand::u8(..) & byte2;
-                self.set_register(register_x, random_num);
-            }
+            0xB => self.update_pc(address),
+            0xC => self.set_register(register_x, fastrand::u8(..) & byte2),
             0xD => {
                 let x = self.get_register(register_x);
                 let y = self.get_register(register_y);

@@ -1,17 +1,18 @@
+mod audio;
 mod characters;
 mod flags;
 mod virtual_machine;
 
+use audio::SquareWave;
+use sdl2::audio::AudioSpecDesired;
 use sdl2::event::Event;
 use sdl2::keyboard::{Keycode, Scancode};
 use sdl2::pixels::Color;
 use sdl2::rect::Rect;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use virtual_machine::{CanvasColor, VirtualMachine};
-
-use sdl2::audio::{AudioCallback, AudioSpecDesired};
 
 const PIXEL_SIZE: usize = 12;
 const WIDTH: usize = 64;
@@ -22,34 +23,10 @@ const REFRESH_RATE: u32 = 60;
 const FRAME_TIME: Duration = Duration::from_nanos(1_000_000_000 / REFRESH_RATE as u64);
 const CLOCK_HZ: u32 = 1000;
 
-struct SquareWave {
-    phase_inc: f32,
-    phase: f32,
-    volume: f32,
-    playing: Arc<AtomicBool>,
-}
+fn main() -> Result<(), String> {
+    // Set default video driver to wayland
+    sdl2::hint::set("SDL_VIDEODRIVER", "wayland,x11");
 
-impl AudioCallback for SquareWave {
-    type Channel = f32;
-
-    fn callback(&mut self, out: &mut [f32]) {
-        let playing = self.playing.load(Ordering::Relaxed);
-        if playing {
-            for x in out.iter_mut() {
-                *x = if self.phase <= 0.5 {
-                    self.volume
-                } else {
-                    -self.volume
-                };
-                self.phase = (self.phase + self.phase_inc) % 1.0;
-            }
-        } else {
-            out.fill(0.0);
-        }
-    }
-}
-
-pub fn main() -> Result<(), String> {
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
     let audio_subsystem = sdl_context.audio()?;
@@ -57,11 +34,13 @@ pub fn main() -> Result<(), String> {
     let flags = flags::Main::from_env_or_exit();
 
     let window = video_subsystem
-        .window("Chip 8", WINDOW_X, WINDOW_Y)
+        .window("CHIP-8", WINDOW_X, WINDOW_Y)
         .position_centered()
         .opengl()
         .build()
         .map_err(|e| e.to_string())?;
+
+    // Audio configuration
 
     let desired_spec = AudioSpecDesired {
         freq: Some(44_100),
@@ -80,12 +59,14 @@ pub fn main() -> Result<(), String> {
 
     device.resume();
 
+    // Window interaction
     let mut canvas = window.into_canvas().build().map_err(|e| e.to_string())?;
-
     let mut event_pump = sdl_context.event_pump()?;
 
+    // Our virtual machine
     let mut machine = VirtualMachine::new(&flags.path, playing);
 
+    // Access to the machine's inner state
     let machine_canvas_mutex = machine.canvas();
     let pressed_key_mutex = machine.pressed_key();
 
@@ -123,11 +104,13 @@ pub fn main() -> Result<(), String> {
             }
         }
 
+        // Drop the lock after rendering the canvas
         drop(machine_canvas);
 
         canvas.fill_rects(&rects)?;
         canvas.present();
 
+        // Read events for the remaining frame time
         while now.elapsed() < FRAME_TIME {
             if let Some(event) = event_pump.wait_event_timeout(now.elapsed().as_millis() as u32) {
                 match event {
@@ -139,13 +122,14 @@ pub fn main() -> Result<(), String> {
                     Event::KeyDown {
                         scancode, repeat, ..
                     } => {
-                        if repeat {
-                            continue;
+                        if !repeat {
+                            // Set pressed key
+                            let mut pressed_key = pressed_key_mutex.lock().unwrap();
+                            *pressed_key = scancode_to_chip8_code(scancode);
                         }
-                        let mut pressed_key = pressed_key_mutex.lock().unwrap();
-                        *pressed_key = scancode_to_chip8_code(scancode);
                     }
                     Event::KeyUp { .. } => {
+                        // Reset pressed key
                         let mut pressed_key = pressed_key_mutex.lock().unwrap();
                         *pressed_key = None;
                     }
