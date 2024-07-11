@@ -9,8 +9,6 @@ use sdl2::event::Event;
 use sdl2::keyboard::{Keycode, Scancode};
 use sdl2::pixels::Color;
 use sdl2::rect::Rect;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use virtual_machine::{CanvasColor, VirtualMachine};
 
@@ -48,41 +46,37 @@ fn main() -> Result<(), String> {
         samples: None,
     };
 
-    let playing = Arc::new(AtomicBool::new(false));
-
     let device = audio_subsystem.open_playback(None, &desired_spec, |spec| SquareWave {
         phase_inc: 200.0 / spec.freq as f32,
         phase: 0.0,
         volume: 0.2,
-        playing: playing.clone(),
     })?;
-
-    device.resume();
 
     // Window interaction
     let mut canvas = window.into_canvas().build().map_err(|e| e.to_string())?;
     let mut event_pump = sdl_context.event_pump()?;
 
     // Our virtual machine
-    let mut machine = VirtualMachine::new(&flags.path, playing);
-
-    // Access to the machine's inner state
-    let machine_canvas_mutex = machine.canvas();
-    let pressed_key_mutex = machine.pressed_key();
-
-    std::thread::spawn({
-        move || loop {
-            machine.execute_opcode();
-            std::thread::sleep(Duration::from_secs_f64(
-                1.0 / flags.frequency.unwrap_or(CLOCK_HZ) as f64,
-            ));
-        }
-    });
+    let mut machine = VirtualMachine::new(&flags.path);
+    let frequency = flags.frequency.unwrap_or(CLOCK_HZ);
+    let instructions_per_frame = frequency / REFRESH_RATE;
+    device.resume();
 
     'main: loop {
         let now = Instant::now();
 
-        let machine_canvas = machine_canvas_mutex.lock().unwrap();
+        machine.delay_timer = machine.delay_timer.saturating_sub(1);
+        machine.sound_timer = machine.sound_timer.saturating_sub(1);
+
+        for _ in 0..instructions_per_frame {
+            machine.execute_opcode();
+        }
+
+        if machine.sound_timer > 0 {
+            device.resume()
+        } else {
+            device.pause();
+        }
 
         canvas.set_draw_color(Color::WHITE);
         canvas.clear();
@@ -92,7 +86,7 @@ fn main() -> Result<(), String> {
         canvas.set_draw_color(Color::BLACK);
         for x in 0..WIDTH {
             for y in 0..HEIGHT {
-                if machine_canvas[y][x] == CanvasColor::Black {
+                if machine.canvas[y][x] == CanvasColor::Black {
                     let rect = Rect::new(
                         (PIXEL_SIZE * x) as i32,
                         (PIXEL_SIZE * y) as i32,
@@ -103,9 +97,6 @@ fn main() -> Result<(), String> {
                 }
             }
         }
-
-        // Drop the lock after rendering the canvas
-        drop(machine_canvas);
 
         canvas.fill_rects(&rects)?;
         canvas.present();
@@ -124,14 +115,12 @@ fn main() -> Result<(), String> {
                     } => {
                         if !repeat {
                             // Set pressed key
-                            let mut pressed_key = pressed_key_mutex.lock().unwrap();
-                            *pressed_key = scancode_to_chip8_code(scancode);
+                            machine.pressed_key = scancode_to_chip8_code(scancode);
                         }
                     }
                     Event::KeyUp { .. } => {
                         // Reset pressed key
-                        let mut pressed_key = pressed_key_mutex.lock().unwrap();
-                        *pressed_key = None;
+                        machine.pressed_key = None;
                     }
                     _ => {}
                 }

@@ -1,13 +1,6 @@
-use std::{
-    path::Path,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
-    time::Instant,
-};
+use std::path::Path;
 
-use crate::{characters, FRAME_TIME, HEIGHT, WIDTH};
+use crate::{characters, HEIGHT, WIDTH};
 
 enum Relation {
     Equal,
@@ -42,17 +35,15 @@ pub struct VirtualMachine {
     stack_size: u8,
     i: u16,
     pc: u16,
-    delay_timer: u8,
-    sound_timer: u8,
-    playing: Arc<AtomicBool>,
-    last_decrement: Instant,
-    pressed_key: Arc<Mutex<Option<u8>>>,
+    pub delay_timer: u8,
+    pub sound_timer: u8,
     should_increment_pc: bool,
-    canvas: Arc<Mutex<[[CanvasColor; WIDTH]; HEIGHT]>>,
+    pub pressed_key: Option<u8>,
+    pub canvas: [[CanvasColor; WIDTH]; HEIGHT],
 }
 
 impl VirtualMachine {
-    pub fn new(path: &Path, playing: Arc<AtomicBool>) -> Self {
+    pub fn new(path: &Path) -> Self {
         let rom = std::fs::read(path).unwrap();
         let mut machine = Self {
             memory: [0; 0x1000],
@@ -63,11 +54,9 @@ impl VirtualMachine {
             pc: 0x200,
             delay_timer: 0,
             sound_timer: 0,
-            playing,
-            last_decrement: Instant::now(),
-            pressed_key: Arc::new(Mutex::new(None)),
+            pressed_key: None,
             should_increment_pc: false,
-            canvas: Arc::new(Mutex::new([[CanvasColor::White; WIDTH]; HEIGHT])),
+            canvas: [[CanvasColor::White; WIDTH]; HEIGHT],
         };
 
         // Game ROM starts at 0x200
@@ -77,14 +66,6 @@ impl VirtualMachine {
         machine.memory[0x50..0xA0].copy_from_slice(&characters::CHARS);
 
         machine
-    }
-
-    pub fn canvas(&self) -> Arc<Mutex<[[CanvasColor; WIDTH]; HEIGHT]>> {
-        self.canvas.clone()
-    }
-
-    pub fn pressed_key(&self) -> Arc<Mutex<Option<u8>>> {
-        self.pressed_key.clone()
     }
 
     fn get_memory(&self, address: u16) -> u8 {
@@ -165,13 +146,11 @@ impl VirtualMachine {
     fn skip_if_key(&mut self, register: u8, relation: Relation) {
         let value = self.get_register(register);
 
-        let mutex = self.pressed_key.lock().unwrap();
-        let key = *mutex;
-        drop(mutex);
-
         let condition = match relation {
-            Relation::Equal => key.is_some_and(|key| key == value),
-            Relation::NotEqual => key.is_none() || key.is_some_and(|key| key != value),
+            Relation::Equal => self.pressed_key.is_some_and(|key| key == value),
+            Relation::NotEqual => {
+                self.pressed_key.is_none() || self.pressed_key.is_some_and(|key| key != value)
+            }
         };
 
         if condition {
@@ -186,18 +165,6 @@ impl VirtualMachine {
 
     /// Source: https://en.wikipedia.org/wiki/CHIP-8#Opcode_table
     pub fn execute_opcode(&mut self) {
-        if self.last_decrement.elapsed() > FRAME_TIME {
-            if self.sound_timer > 0 {
-                self.sound_timer -= 1;
-            } else {
-                self.playing.store(false, Ordering::Relaxed);
-            }
-
-            self.delay_timer = self.delay_timer.saturating_sub(1);
-
-            self.last_decrement = Instant::now();
-        }
-
         self.should_increment_pc = true;
 
         let (byte1, byte2) = (self.get_memory(self.pc), self.get_memory(self.pc + 1));
@@ -246,10 +213,7 @@ impl VirtualMachine {
             0xF => match byte2 {
                 0x07 => self.set_register(register_x, self.delay_timer),
                 0x0A => {
-                    let mut mutex = self.pressed_key.lock().unwrap();
-                    let value = *mutex;
-                    *mutex = None;
-                    drop(mutex);
+                    let value = self.pressed_key.take();
 
                     if let Some(code) = value {
                         self.set_register(register_x, code);
@@ -260,9 +224,9 @@ impl VirtualMachine {
                 0x15 => self.delay_timer = self.get_register(register_x),
                 0x18 => {
                     self.sound_timer = self.get_register(register_x);
-                    self.playing.store(true, Ordering::Relaxed);
-                    if self.sound_timer < 3 {
-                        self.sound_timer = 3;
+                    // SDL doesnt alway play audio if it only lasts for 1 frame
+                    if self.sound_timer < 2 {
+                        self.sound_timer = 2;
                     }
                 }
                 0x1E => self.i += self.get_register(register_x) as u16,
@@ -343,29 +307,25 @@ impl VirtualMachine {
         self.set_register(register_x, result);
     }
 
-    pub fn clear_canvas(&self) {
-        let mut canvas = self.canvas.lock().unwrap();
-        canvas
+    pub fn clear_canvas(&mut self) {
+        self.canvas
             .iter_mut()
             .for_each(|row| row.fill(CanvasColor::White));
     }
 
     fn draw(&mut self, x: u8, y: u8, height: u8) {
-        let mut canvas = self.canvas.lock().unwrap();
         let mut collision = false;
         for dy in 0..height {
             let byte = self.get_memory(self.i + dy as u16);
             for dx in 0..8 {
                 let pixel = byte & (0x80 >> dx) != 0;
                 if pixel {
-                    collision |= canvas[y.wrapping_add(dy) as usize % HEIGHT]
+                    collision |= self.canvas[y.wrapping_add(dy) as usize % HEIGHT]
                         [x.wrapping_add(dx) as usize % WIDTH]
                         .change();
                 }
             }
         }
-
-        drop(canvas);
 
         self.set_flag(collision as u8);
     }
