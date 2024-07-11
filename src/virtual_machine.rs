@@ -1,13 +1,13 @@
 use std::{
     path::Path,
     sync::{
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    time::Duration,
+    time::Instant,
 };
 
-use crate::{characters, HEIGHT, WIDTH};
+use crate::{characters, FRAME_TIME, HEIGHT, WIDTH};
 
 enum Relation {
     Equal,
@@ -42,15 +42,17 @@ pub struct VirtualMachine {
     stack_size: u8,
     i: u16,
     pc: u16,
-    delay_timer: Arc<AtomicU8>,
-    sound_timer: Arc<AtomicU8>,
+    delay_timer: u8,
+    sound_timer: u8,
+    playing: Arc<AtomicBool>,
+    last_decrement: Instant,
     pressed_key: Arc<Mutex<Option<u8>>>,
     should_increment_pc: bool,
     canvas: Arc<Mutex<[[CanvasColor; WIDTH]; HEIGHT]>>,
 }
 
 impl VirtualMachine {
-    pub fn new(path: &Path) -> Self {
+    pub fn new(path: &Path, playing: Arc<AtomicBool>) -> Self {
         let rom = std::fs::read(path).unwrap();
         let mut machine = Self {
             memory: [0; 0x1000],
@@ -59,8 +61,10 @@ impl VirtualMachine {
             stack_size: 0,
             i: 0x200,
             pc: 0x200,
-            delay_timer: Arc::new(AtomicU8::new(0)),
-            sound_timer: Arc::new(AtomicU8::new(0)),
+            delay_timer: 0,
+            sound_timer: 0,
+            playing,
+            last_decrement: Instant::now(),
             pressed_key: Arc::new(Mutex::new(None)),
             should_increment_pc: false,
             canvas: Arc::new(Mutex::new([[CanvasColor::White; WIDTH]; HEIGHT])),
@@ -69,33 +73,11 @@ impl VirtualMachine {
         machine.memory[0x200..(0x200 + rom.len())].copy_from_slice(&rom);
         machine.memory[0x50..0xA0].copy_from_slice(&characters::CHARS);
 
-        std::thread::spawn({
-            let sound_timer = machine.sound_timer.clone();
-            let delay_timer = machine.delay_timer.clone();
-            move || loop {
-                let sound_value = sound_timer.load(Ordering::Relaxed);
-                if sound_value > 0 {
-                    sound_timer.store(sound_value - 1, Ordering::Relaxed);
-                }
-
-                let delay_value = delay_timer.load(Ordering::Relaxed);
-                if delay_value > 0 {
-                    delay_timer.store(delay_value - 1, Ordering::Relaxed);
-                }
-
-                std::thread::sleep(Duration::from_secs_f64(1.0 / 60.0));
-            }
-        });
-
         machine
     }
 
     pub fn canvas(&self) -> Arc<Mutex<[[CanvasColor; WIDTH]; HEIGHT]>> {
         self.canvas.clone()
-    }
-
-    pub fn sound_timer(&self) -> Arc<AtomicU8> {
-        self.sound_timer.clone()
     }
 
     pub fn pressed_key(&self) -> Arc<Mutex<Option<u8>>> {
@@ -194,9 +176,22 @@ impl VirtualMachine {
     }
 
     pub fn execute_opcode(&mut self) {
+        if self.last_decrement.elapsed() > FRAME_TIME {
+            if self.sound_timer > 0 {
+                self.sound_timer -= 1;
+            } else {
+                self.playing.store(false, Ordering::Relaxed);
+            }
+
+            self.delay_timer = self.delay_timer.saturating_sub(1);
+
+            self.last_decrement = Instant::now();
+        }
+
         self.should_increment_pc = true;
+
         let (byte1, byte2) = (self.get_memory(self.pc), self.get_memory(self.pc + 1));
-        // println!("Byte1: {:02X}, Byte2: {:02X}", byte1, byte2);
+
         let address = ((byte1 as u16 & 0x0F) << 8) | (byte2 as u16);
         let register_x = byte1 & 0x0F;
         let register_y = byte2 >> 4;
@@ -246,10 +241,7 @@ impl VirtualMachine {
                 _ => unreachable!(),
             },
             0xF => match byte2 {
-                0x07 => {
-                    let value = self.delay_timer.load(Ordering::Relaxed);
-                    self.set_register(register_x, value);
-                }
+                0x07 => self.set_register(register_x, self.delay_timer),
                 0x0A => {
                     let mut mutex = self.pressed_key.lock().unwrap();
                     let value = *mutex;
@@ -262,13 +254,13 @@ impl VirtualMachine {
                         return;
                     }
                 }
-                0x15 => {
-                    let value = self.get_register(register_x);
-                    self.delay_timer.store(value, Ordering::Relaxed);
-                }
+                0x15 => self.delay_timer = self.get_register(register_x),
                 0x18 => {
-                    let value = self.get_register(register_x);
-                    self.sound_timer.store(value, Ordering::Relaxed);
+                    self.sound_timer = self.get_register(register_x);
+                    self.playing.store(true, Ordering::Relaxed);
+                    if self.sound_timer < 3 {
+                        self.sound_timer = 3;
+                    }
                 }
                 0x1E => self.i += self.get_register(register_x) as u16,
                 0x29 => self.i = 0x50 + self.get_register(register_x) as u16 * 5,
@@ -363,8 +355,9 @@ impl VirtualMachine {
             for dx in 0..8 {
                 let pixel = byte & (0x80 >> dx) != 0;
                 if pixel {
-                    collision |=
-                        canvas[(y + dy) as usize % HEIGHT][(x + dx) as usize % WIDTH].change();
+                    collision |= canvas[y.wrapping_add(dy) as usize % HEIGHT]
+                        [x.wrapping_add(dx) as usize % WIDTH]
+                        .change();
                 }
             }
         }

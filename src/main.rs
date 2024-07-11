@@ -1,15 +1,14 @@
 mod characters;
+mod flags;
 mod virtual_machine;
 
 use sdl2::event::Event;
 use sdl2::keyboard::{Keycode, Scancode};
 use sdl2::pixels::Color;
 use sdl2::rect::Rect;
-use std::sync::atomic::Ordering;
-use std::{
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use virtual_machine::{CanvasColor, VirtualMachine};
 
 use sdl2::audio::{AudioCallback, AudioSpecDesired};
@@ -27,19 +26,25 @@ struct SquareWave {
     phase_inc: f32,
     phase: f32,
     volume: f32,
+    playing: Arc<AtomicBool>,
 }
 
 impl AudioCallback for SquareWave {
     type Channel = f32;
 
     fn callback(&mut self, out: &mut [f32]) {
-        for x in out.iter_mut() {
-            *x = if self.phase <= 0.5 {
-                self.volume
-            } else {
-                -self.volume
-            };
-            self.phase = (self.phase + self.phase_inc) % 1.0;
+        let playing = self.playing.load(Ordering::Relaxed);
+        if playing {
+            for x in out.iter_mut() {
+                *x = if self.phase <= 0.5 {
+                    self.volume
+                } else {
+                    -self.volume
+                };
+                self.phase = (self.phase + self.phase_inc) % 1.0;
+            }
+        } else {
+            out.fill(0.0);
         }
     }
 }
@@ -48,6 +53,8 @@ pub fn main() -> Result<(), String> {
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
     let audio_subsystem = sdl_context.audio()?;
+
+    let flags = flags::Main::from_env_or_exit();
 
     let window = video_subsystem
         .window("Chip 8", WINDOW_X, WINDOW_Y)
@@ -62,49 +69,43 @@ pub fn main() -> Result<(), String> {
         samples: None,
     };
 
+    let playing = Arc::new(AtomicBool::new(false));
+
     let device = audio_subsystem.open_playback(None, &desired_spec, |spec| SquareWave {
-        phase_inc: 440.0 / spec.freq as f32,
+        phase_inc: 200.0 / spec.freq as f32,
         phase: 0.0,
-        volume: 0.25,
+        volume: 0.2,
+        playing: playing.clone(),
     })?;
+
+    device.resume();
 
     let mut canvas = window.into_canvas().build().map_err(|e| e.to_string())?;
 
     let mut event_pump = sdl_context.event_pump()?;
 
-    let path = PathBuf::from(std::env::args().nth(1).unwrap());
-
-    let mut machine = VirtualMachine::new(&path);
+    let mut machine = VirtualMachine::new(&flags.path, playing);
 
     let machine_canvas_mutex = machine.canvas();
     let pressed_key_mutex = machine.pressed_key();
-    let sound_timer = machine.sound_timer();
 
     std::thread::spawn({
-        let frequency = std::env::args()
-            .nth(2)
-            .map(|x| x.parse().unwrap())
-            .unwrap_or(CLOCK_HZ);
-
         move || loop {
             machine.execute_opcode();
-            std::thread::sleep(Duration::from_secs_f64(1.0 / frequency as f64));
+            std::thread::sleep(Duration::from_secs_f64(
+                1.0 / flags.frequency.unwrap_or(CLOCK_HZ) as f64,
+            ));
         }
     });
 
     'main: loop {
         let now = Instant::now();
 
-        if sound_timer.load(Ordering::Relaxed) > 0 {
-            device.resume();
-        } else {
-            device.pause();
-        }
+        let machine_canvas = machine_canvas_mutex.lock().unwrap();
 
         canvas.set_draw_color(Color::WHITE);
         canvas.clear();
 
-        let machine_canvas = machine_canvas_mutex.lock().unwrap();
         let mut rects = Vec::with_capacity(WIDTH * HEIGHT);
 
         canvas.set_draw_color(Color::BLACK);

@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 fastrand = "2.1.0"
 sdl2 = "0.37.0"
+xflags = "0.3.2"
