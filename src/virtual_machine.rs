@@ -23,12 +23,12 @@ pub enum CanvasColor {
 impl CanvasColor {
     fn change(&mut self) -> bool {
         match self {
-            CanvasColor::White => {
-                *self = CanvasColor::Black;
+            Self::White => {
+                *self = Self::Black;
                 false
             }
-            CanvasColor::Black => {
-                *self = CanvasColor::White;
+            Self::Black => {
+                *self = Self::White;
                 true
             }
         }
@@ -44,20 +44,13 @@ pub struct VirtualMachine {
     pc: u16,
     delay_timer: Arc<AtomicU8>,
     sound_timer: Arc<AtomicU8>,
-    current_pressed_key: Arc<Mutex<Option<u8>>>,
+    pressed_key: Arc<Mutex<Option<u8>>>,
     should_increment_pc: bool,
     canvas: Arc<Mutex<[[CanvasColor; WIDTH]; HEIGHT]>>,
 }
 
 impl VirtualMachine {
-    pub fn new(
-        path: &Path,
-    ) -> (
-        Self,
-        Arc<Mutex<[[CanvasColor; WIDTH]; HEIGHT]>>,
-        Arc<Mutex<Option<u8>>>,
-        Arc<AtomicU8>,
-    ) {
+    pub fn new(path: &Path) -> Self {
         let rom = std::fs::read(path).unwrap();
         let mut machine = Self {
             memory: [0; 0x1000],
@@ -68,7 +61,7 @@ impl VirtualMachine {
             pc: 0x200,
             delay_timer: Arc::new(AtomicU8::new(0)),
             sound_timer: Arc::new(AtomicU8::new(0)),
-            current_pressed_key: Arc::new(Mutex::new(None)),
+            pressed_key: Arc::new(Mutex::new(None)),
             should_increment_pc: false,
             canvas: Arc::new(Mutex::new([[CanvasColor::White; WIDTH]; HEIGHT])),
         };
@@ -94,13 +87,22 @@ impl VirtualMachine {
             }
         });
 
-        let canvas_arc = machine.canvas.clone();
-        let key_arc = machine.current_pressed_key.clone();
-        let sound_arc = machine.sound_timer.clone();
-        (machine, canvas_arc, key_arc, sound_arc)
+        machine
     }
 
-    fn get_memory(&self, address: u16) -> u8 {
+    pub fn canvas(&self) -> Arc<Mutex<[[CanvasColor; WIDTH]; HEIGHT]>> {
+        self.canvas.clone()
+    }
+
+    pub fn sound_timer(&self) -> Arc<AtomicU8> {
+        self.sound_timer.clone()
+    }
+
+    pub fn pressed_key(&self) -> Arc<Mutex<Option<u8>>> {
+        self.pressed_key.clone()
+    }
+
+    const fn get_memory(&self, address: u16) -> u8 {
         self.memory[address as usize]
     }
 
@@ -108,7 +110,7 @@ impl VirtualMachine {
         self.memory[address as usize] = byte
     }
 
-    fn get_register(&self, register: u8) -> u8 {
+    const fn get_register(&self, register: u8) -> u8 {
         self.registers[register as usize]
     }
 
@@ -172,7 +174,7 @@ impl VirtualMachine {
     fn skip_if_key(&mut self, register: u8, relation: Relation) {
         let value = self.get_register(register);
 
-        let mutex = self.current_pressed_key.lock().unwrap();
+        let mutex = self.pressed_key.lock().unwrap();
         let key = *mutex;
         drop(mutex);
 
@@ -249,7 +251,7 @@ impl VirtualMachine {
                     self.set_register(register_x, value);
                 }
                 0x0A => {
-                    let mut mutex = self.current_pressed_key.lock().unwrap();
+                    let mut mutex = self.pressed_key.lock().unwrap();
                     let value = *mutex;
                     *mutex = None;
                     drop(mutex);
@@ -346,7 +348,7 @@ impl VirtualMachine {
         self.set_register(register_x, result);
     }
 
-    pub fn clear_canvas(&mut self) {
+    pub fn clear_canvas(&self) {
         let mut canvas = self.canvas.lock().unwrap();
         canvas
             .iter_mut()

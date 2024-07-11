@@ -21,7 +21,7 @@ const WINDOW_Y: u32 = (PIXEL_SIZE * HEIGHT) as u32;
 const WINDOW_X: u32 = (PIXEL_SIZE * WIDTH) as u32;
 const REFRESH_RATE: u32 = 60;
 const FRAME_TIME: Duration = Duration::from_nanos(1_000_000_000 / REFRESH_RATE as u64);
-const CLOCK_HZ: u32 = 10000;
+const CLOCK_HZ: u32 = 1000;
 
 struct SquareWave {
     phase_inc: f32,
@@ -74,13 +74,21 @@ pub fn main() -> Result<(), String> {
 
     let path = PathBuf::from(std::env::args().nth(1).unwrap());
 
-    let (mut machine, machine_canvas_mutex, current_pressed_key, sound_timer) =
-        VirtualMachine::new(&path);
+    let mut machine = VirtualMachine::new(&path);
+
+    let machine_canvas_mutex = machine.canvas();
+    let pressed_key_mutex = machine.pressed_key();
+    let sound_timer = machine.sound_timer();
 
     std::thread::spawn({
+        let frequency = std::env::args()
+            .nth(2)
+            .map(|x| x.parse().unwrap())
+            .unwrap_or(CLOCK_HZ);
+
         move || loop {
             machine.execute_opcode();
-            std::thread::sleep(Duration::from_secs_f64(1.0 / CLOCK_HZ as f64));
+            std::thread::sleep(Duration::from_secs_f64(1.0 / frequency as f64));
         }
     });
 
@@ -133,12 +141,12 @@ pub fn main() -> Result<(), String> {
                         if repeat {
                             continue;
                         }
-                        let mut mutex = current_pressed_key.lock().unwrap();
-                        *mutex = code_to_code(scancode);
+                        let mut pressed_key = pressed_key_mutex.lock().unwrap();
+                        *pressed_key = scancode_to_chip8_code(scancode);
                     }
                     Event::KeyUp { .. } => {
-                        let mut mutex = current_pressed_key.lock().unwrap();
-                        *mutex = None;
+                        let mut pressed_key = pressed_key_mutex.lock().unwrap();
+                        *pressed_key = None;
                     }
                     _ => {}
                 }
@@ -149,7 +157,7 @@ pub fn main() -> Result<(), String> {
     Ok(())
 }
 
-fn code_to_code(scancode: Option<Scancode>) -> Option<u8> {
+fn scancode_to_chip8_code(scancode: Option<Scancode>) -> Option<u8> {
     scancode.and_then(|code| match code {
         Scancode::Num1 => Some(0x1),
         Scancode::Num2 => Some(0x2),
