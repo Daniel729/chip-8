@@ -22,14 +22,30 @@ const FRAME_TIME: Duration = Duration::from_nanos(1_000_000_000 / REFRESH_RATE a
 const CLOCK_HZ: u32 = 1000;
 
 fn main() -> Result<(), String> {
+    let flags = flags::Main::from_env_or_exit();
+
+    if flags.benchmark {
+        let mut machine = VirtualMachine::new(&flags.path);
+        let start = Instant::now();
+        let millions = flags.count.unwrap_or(100);
+        for _ in 0..(millions * 1_000_000) {
+            machine.execute_opcode();
+        }
+        let elapsed = start.elapsed();
+        println!("Elapsed time: {:?}", elapsed);
+        println!(
+            "Frequency: {:.2} MHz",
+            millions as f64 / elapsed.as_secs_f64()
+        );
+        return Ok(());
+    }
+
     // Set default video driver to wayland
     sdl2::hint::set("SDL_VIDEODRIVER", "wayland,x11");
 
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
     let audio_subsystem = sdl_context.audio()?;
-
-    let flags = flags::Main::from_env_or_exit();
 
     let window = video_subsystem
         .window("CHIP-8", WINDOW_X, WINDOW_Y)
@@ -53,7 +69,13 @@ fn main() -> Result<(), String> {
     })?;
 
     // Window interaction
-    let mut canvas = window.into_canvas().build().map_err(|e| e.to_string())?;
+    let mut canvas = window
+        .into_canvas()
+        .accelerated()
+        .present_vsync()
+        .build()
+        .map_err(|e| e.to_string())?;
+
     let mut event_pump = sdl_context.event_pump()?;
 
     // Our virtual machine

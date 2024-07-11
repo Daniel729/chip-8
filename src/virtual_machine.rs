@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use arrayvec::ArrayVec;
+
 use crate::{characters, HEIGHT, WIDTH};
 
 enum Relation {
@@ -30,9 +32,8 @@ impl CanvasColor {
 
 pub struct VirtualMachine {
     memory: [u8; 0x1000],
+    stack: ArrayVec<u16, 100>,
     registers: [u8; 16],
-    stack: [u16; 100],
-    stack_size: u8,
     i: u16,
     pc: u16,
     pub delay_timer: u8,
@@ -47,9 +48,8 @@ impl VirtualMachine {
         let rom = std::fs::read(path).unwrap();
         let mut machine = Self {
             memory: [0; 0x1000],
+            stack: ArrayVec::new(),
             registers: [0; 16],
-            stack: [0; 100],
-            stack_size: 0,
             i: 0x200,
             pc: 0x200,
             delay_timer: 0,
@@ -69,19 +69,23 @@ impl VirtualMachine {
     }
 
     fn get_memory(&self, address: u16) -> u8 {
-        self.memory[address as usize]
+        debug_assert!(address < 0x1000, "Address out of bounds: {:#X}", address);
+        unsafe { *self.memory.get_unchecked(address as usize) }
     }
 
     fn set_memory(&mut self, address: u16, byte: u8) {
-        self.memory[address as usize] = byte
+        debug_assert!(address < 0x1000, "Address out of bounds: {:#X}", address);
+        unsafe { *self.memory.get_unchecked_mut(address as usize) = byte }
     }
 
     fn get_register(&self, register: u8) -> u8 {
-        self.registers[register as usize]
+        debug_assert!(register < 0x10, "Register does not exist: {:#X}", register);
+        unsafe { *self.registers.get_unchecked(register as usize) }
     }
 
     fn set_register(&mut self, register: u8, byte: u8) {
-        self.registers[register as usize] = byte;
+        debug_assert!(register < 0x10, "Register does not exist: {:#X}", register);
+        unsafe { *self.registers.get_unchecked_mut(register as usize) = byte }
     }
 
     fn set_flag(&mut self, flag: u8) {
@@ -96,16 +100,13 @@ impl VirtualMachine {
 
     fn call(&mut self, address: u16) {
         self.inc_pc();
-        self.stack[self.stack_size as usize] = self.pc;
-        self.stack_size += 1;
+        self.stack.push(self.pc);
         self.pc = address;
         self.should_increment_pc = false;
     }
 
     fn _return(&mut self) {
-        assert!(self.stack_size >= 1);
-        self.stack_size -= 1;
-        self.pc = self.stack[self.stack_size as usize];
+        self.pc = self.stack.pop().unwrap();
         self.should_increment_pc = false;
     }
 
@@ -320,9 +321,13 @@ impl VirtualMachine {
             for dx in 0..8 {
                 let pixel = byte & (0x80 >> dx) != 0;
                 if pixel {
-                    collision |= self.canvas[y.wrapping_add(dy) as usize % HEIGHT]
-                        [x.wrapping_add(dx) as usize % WIDTH]
-                        .change();
+                    let canvas_pixel = unsafe {
+                        self.canvas
+                            .get_unchecked_mut(y.wrapping_add(dy) as usize % HEIGHT)
+                            .get_unchecked_mut(x.wrapping_add(dx) as usize % WIDTH)
+                    };
+
+                    collision |= canvas_pixel.change();
                 }
             }
         }
