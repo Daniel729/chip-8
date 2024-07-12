@@ -2,33 +2,13 @@ use std::path::Path;
 
 use arrayvec::ArrayVec;
 
-use crate::{characters, HEIGHT, WIDTH};
+use crate::{characters, HEIGHT};
 use anyhow::{Context, Result};
 
+#[derive(Debug)]
 enum Relation {
     Equal,
     NotEqual,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum CanvasColor {
-    White,
-    Black,
-}
-
-impl CanvasColor {
-    fn change(&mut self) -> bool {
-        match self {
-            Self::White => {
-                *self = Self::Black;
-                false
-            }
-            Self::Black => {
-                *self = Self::White;
-                true
-            }
-        }
-    }
 }
 
 pub struct VirtualMachine {
@@ -40,7 +20,7 @@ pub struct VirtualMachine {
     pub delay_timer: u8,
     pub sound_timer: u8,
     pub pressed_key: Option<u8>,
-    pub canvas: [[CanvasColor; WIDTH]; HEIGHT],
+    pub canvas: [u64; HEIGHT],
 }
 
 impl VirtualMachine {
@@ -55,7 +35,7 @@ impl VirtualMachine {
             delay_timer: 0,
             sound_timer: 0,
             pressed_key: None,
-            canvas: [[CanvasColor::White; WIDTH]; HEIGHT],
+            canvas: [0; HEIGHT],
         };
 
         // Game ROM starts at 0x200
@@ -94,26 +74,6 @@ impl VirtualMachine {
     fn update_pc(&mut self, address: u16) {
         let new_pc = self.get_register(0) as u16 + address;
         self.pc = new_pc;
-        self.dec_pc();
-    }
-
-    fn call(&mut self, address: u16) {
-        assert!(self.stack.len() < self.stack.capacity(), "Stack overflow");
-        self.inc_pc();
-        self.stack.push(self.pc);
-        self.pc = address;
-        self.dec_pc();
-    }
-
-    fn _return(&mut self) {
-        debug_assert!(!self.stack.is_empty(), "Stack underflow");
-        self.pc = self.stack.pop().unwrap();
-        self.dec_pc();
-    }
-
-    fn jump_to(&mut self, address: u16) {
-        self.pc = address;
-        self.dec_pc();
     }
 
     fn inc_pc(&mut self) {
@@ -122,6 +82,21 @@ impl VirtualMachine {
 
     fn dec_pc(&mut self) {
         self.pc -= 2;
+    }
+
+    fn call(&mut self, address: u16) {
+        assert!(self.stack.len() < self.stack.capacity(), "Stack overflow");
+        self.stack.push(self.pc);
+        self.pc = address;
+    }
+
+    fn _return(&mut self) {
+        debug_assert!(!self.stack.is_empty(), "Stack underflow");
+        self.pc = self.stack.pop().unwrap();
+    }
+
+    fn jump_to(&mut self, address: u16) {
+        self.pc = address;
     }
 
     fn skip_if_byte(&mut self, register: u8, byte: u8, relation: Relation) {
@@ -178,6 +153,8 @@ impl VirtualMachine {
         let register_y = byte2 >> 4;
         let last_nibble = byte2 & 0x0F;
 
+        self.inc_pc();
+
         match (byte1 & 0xF0) >> 4 {
             0x0 => match byte2 {
                 0xE0 => self.clear_canvas(),
@@ -222,7 +199,7 @@ impl VirtualMachine {
                     if let Some(code) = value {
                         self.set_register(register_x, code);
                     } else {
-                        return;
+                        self.dec_pc();
                     }
                 }
                 0x15 => self.delay_timer = self.get_register(register_x),
@@ -242,8 +219,6 @@ impl VirtualMachine {
             },
             _ => unreachable!(),
         }
-
-        self.inc_pc();
     }
 
     fn dump_registers(&mut self, register: u8) {
@@ -310,25 +285,23 @@ impl VirtualMachine {
     }
 
     pub fn clear_canvas(&mut self) {
-        self.canvas
-            .iter_mut()
-            .for_each(|row| row.fill(CanvasColor::White));
+        self.canvas.fill(0);
     }
 
     fn draw(&mut self, x: u8, y: u8, height: u8) {
         let mut collision = false;
         for dy in 0..height {
-            let byte = self.get_memory(self.i + dy as u16);
-            for dx in 0..8 {
-                let pixel = byte & (0x80 >> dx) != 0;
-                if pixel {
-                    // The compiler should be able to optimize away bounds checking
-                    let canvas_pixel = &mut self.canvas[y.wrapping_add(dy) as usize % HEIGHT]
-                        [x.wrapping_add(dx) as usize % WIDTH];
+            let byte = (self.get_memory(self.i + dy as u16).reverse_bits() as u64) << x;
 
-                    collision |= canvas_pixel.change();
-                }
+            let canvas_row = &mut self.canvas[y.wrapping_add(dy) as usize % HEIGHT];
+
+            let mask = byte & *canvas_row;
+
+            if mask != 0 {
+                collision = true;
             }
+
+            *canvas_row ^= byte;
         }
 
         self.set_flag(collision as u8);

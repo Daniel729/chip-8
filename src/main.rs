@@ -11,7 +11,7 @@ use sdl2::keyboard::{Keycode, Scancode};
 use sdl2::pixels::Color;
 use sdl2::rect::Rect;
 use std::time::{Duration, Instant};
-use virtual_machine::{CanvasColor, VirtualMachine};
+use virtual_machine::VirtualMachine;
 
 const PIXEL_SIZE: usize = 12;
 const WIDTH: usize = 64;
@@ -102,7 +102,7 @@ fn main() -> Result<()> {
         canvas.set_draw_color(Color::BLACK);
         for x in 0..WIDTH {
             for y in 0..HEIGHT {
-                if machine.canvas[y][x] == CanvasColor::Black {
+                if (machine.canvas[y] >> x) & 1 == 1 {
                     let rect = Rect::new(
                         (PIXEL_SIZE * x) as i32,
                         (PIXEL_SIZE * y) as i32,
