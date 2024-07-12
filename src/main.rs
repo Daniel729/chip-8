@@ -3,6 +3,7 @@ mod characters;
 mod flags;
 mod virtual_machine;
 
+use anyhow::{anyhow, Result};
 use audio::SquareWave;
 use sdl2::audio::AudioSpecDesired;
 use sdl2::event::Event;
@@ -21,38 +22,33 @@ const REFRESH_RATE: u32 = 60;
 const FRAME_TIME: Duration = Duration::from_nanos(1_000_000_000 / REFRESH_RATE as u64);
 const CLOCK_HZ: u32 = 1000;
 
-fn main() -> Result<(), String> {
+fn main() -> Result<()> {
     let flags = flags::Main::from_env_or_exit();
 
     if flags.benchmark {
-        let mut machine = VirtualMachine::new(&flags.path);
+        let mut machine = VirtualMachine::new(&flags.path)?;
         let start = Instant::now();
         let millions = flags.count.unwrap_or(100);
         for _ in 0..(millions * 1_000_000) {
             machine.execute_opcode();
         }
         let elapsed = start.elapsed();
-        println!("Elapsed time: {:?}", elapsed);
-        println!(
-            "Frequency: {:.2} MHz",
-            millions as f64 / elapsed.as_secs_f64()
-        );
+        println!("{:.2}", millions as f64 / elapsed.as_secs_f64());
         return Ok(());
     }
 
     // Set default video driver to wayland
     sdl2::hint::set("SDL_VIDEODRIVER", "wayland,x11");
 
-    let sdl_context = sdl2::init()?;
-    let video_subsystem = sdl_context.video()?;
-    let audio_subsystem = sdl_context.audio()?;
+    let sdl_context = sdl2::init().map_err(|err| anyhow!(err))?;
+    let video_subsystem = sdl_context.video().map_err(|err| anyhow!(err))?;
+    let audio_subsystem = sdl_context.audio().map_err(|err| anyhow!(err))?;
 
     let window = video_subsystem
         .window("CHIP-8", WINDOW_X, WINDOW_Y)
         .position_centered()
         .opengl()
-        .build()
-        .map_err(|e| e.to_string())?;
+        .build()?;
 
     // Audio configuration
 
@@ -62,30 +58,30 @@ fn main() -> Result<(), String> {
         samples: None,
     };
 
-    let device = audio_subsystem.open_playback(None, &desired_spec, |spec| SquareWave {
-        phase_inc: 200.0 / spec.freq as f32,
-        phase: 0.0,
-        volume: 0.2,
-    })?;
+    let device = audio_subsystem
+        .open_playback(None, &desired_spec, |spec| SquareWave {
+            phase_inc: 200.0 / spec.freq as f32,
+            phase: 0.0,
+            volume: 0.2,
+        })
+        .map_err(|err| anyhow!(err))?;
 
     // Window interaction
-    let mut canvas = window
-        .into_canvas()
-        .accelerated()
-        .present_vsync()
-        .build()
-        .map_err(|e| e.to_string())?;
+    let mut canvas = window.into_canvas().accelerated().present_vsync().build()?;
 
-    let mut event_pump = sdl_context.event_pump()?;
+    let mut event_pump = sdl_context.event_pump().map_err(|err| anyhow!(err))?;
 
     // Our virtual machine
-    let mut machine = VirtualMachine::new(&flags.path);
+    let mut machine = VirtualMachine::new(&flags.path)?;
     let frequency = flags.frequency.unwrap_or(CLOCK_HZ);
     let instructions_per_frame = frequency / REFRESH_RATE;
     device.resume();
 
+    let mut rects = Vec::with_capacity(WIDTH * HEIGHT);
+
     'main: loop {
         let now = Instant::now();
+        rects.clear();
 
         machine.delay_timer = machine.delay_timer.saturating_sub(1);
         machine.sound_timer = machine.sound_timer.saturating_sub(1);
@@ -103,8 +99,6 @@ fn main() -> Result<(), String> {
         canvas.set_draw_color(Color::WHITE);
         canvas.clear();
 
-        let mut rects = Vec::with_capacity(WIDTH * HEIGHT);
-
         canvas.set_draw_color(Color::BLACK);
         for x in 0..WIDTH {
             for y in 0..HEIGHT {
@@ -120,7 +114,7 @@ fn main() -> Result<(), String> {
             }
         }
 
-        canvas.fill_rects(&rects)?;
+        canvas.fill_rects(&rects).map_err(|err| anyhow!(err))?;
         canvas.present();
 
         // Read events for the remaining frame time

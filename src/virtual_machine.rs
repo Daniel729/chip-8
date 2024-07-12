@@ -3,6 +3,7 @@ use std::path::Path;
 use arrayvec::ArrayVec;
 
 use crate::{characters, HEIGHT, WIDTH};
+use anyhow::{Context, Result};
 
 enum Relation {
     Equal,
@@ -38,14 +39,13 @@ pub struct VirtualMachine {
     pc: u16,
     pub delay_timer: u8,
     pub sound_timer: u8,
-    should_increment_pc: bool,
     pub pressed_key: Option<u8>,
     pub canvas: [[CanvasColor; WIDTH]; HEIGHT],
 }
 
 impl VirtualMachine {
-    pub fn new(path: &Path) -> Self {
-        let rom = std::fs::read(path).unwrap();
+    pub fn new(path: &Path) -> Result<Self> {
+        let rom = std::fs::read(path).with_context(|| format!("Failed to read ROM: {:?}", path))?;
         let mut machine = Self {
             memory: [0; 0x1000],
             stack: ArrayVec::new(),
@@ -55,7 +55,6 @@ impl VirtualMachine {
             delay_timer: 0,
             sound_timer: 0,
             pressed_key: None,
-            should_increment_pc: false,
             canvas: [[CanvasColor::White; WIDTH]; HEIGHT],
         };
 
@@ -65,7 +64,7 @@ impl VirtualMachine {
         // Font ROM starts at 0x50
         machine.memory[0x50..0xA0].copy_from_slice(&characters::CHARS);
 
-        machine
+        Ok(machine)
     }
 
     fn get_memory(&self, address: u16) -> u8 {
@@ -95,28 +94,34 @@ impl VirtualMachine {
     fn update_pc(&mut self, address: u16) {
         let new_pc = self.get_register(0) as u16 + address;
         self.pc = new_pc;
-        self.should_increment_pc = false;
+        self.dec_pc();
     }
 
     fn call(&mut self, address: u16) {
+        assert!(self.stack.len() < self.stack.capacity(), "Stack overflow");
         self.inc_pc();
         self.stack.push(self.pc);
         self.pc = address;
-        self.should_increment_pc = false;
+        self.dec_pc();
     }
 
     fn _return(&mut self) {
+        debug_assert!(!self.stack.is_empty(), "Stack underflow");
         self.pc = self.stack.pop().unwrap();
-        self.should_increment_pc = false;
+        self.dec_pc();
     }
 
     fn jump_to(&mut self, address: u16) {
         self.pc = address;
-        self.should_increment_pc = false;
+        self.dec_pc();
     }
 
     fn inc_pc(&mut self) {
         self.pc += 2;
+    }
+
+    fn dec_pc(&mut self) {
+        self.pc -= 2;
     }
 
     fn skip_if_byte(&mut self, register: u8, byte: u8, relation: Relation) {
@@ -166,8 +171,6 @@ impl VirtualMachine {
 
     /// Source: https://en.wikipedia.org/wiki/CHIP-8#Opcode_table
     pub fn execute_opcode(&mut self) {
-        self.should_increment_pc = true;
-
         let (byte1, byte2) = (self.get_memory(self.pc), self.get_memory(self.pc + 1));
 
         let address = ((byte1 as u16 & 0x0F) << 8) | (byte2 as u16);
@@ -240,9 +243,7 @@ impl VirtualMachine {
             _ => unreachable!(),
         }
 
-        if self.should_increment_pc {
-            self.inc_pc()
-        }
+        self.inc_pc();
     }
 
     fn dump_registers(&mut self, register: u8) {
@@ -302,7 +303,7 @@ impl VirtualMachine {
                 self.set_flag(value_x >> 7);
                 value_x << 1
             }
-            _ => panic!(),
+            _ => unreachable!(),
         };
 
         self.set_register(register_x, result);
@@ -321,11 +322,9 @@ impl VirtualMachine {
             for dx in 0..8 {
                 let pixel = byte & (0x80 >> dx) != 0;
                 if pixel {
-                    let canvas_pixel = unsafe {
-                        self.canvas
-                            .get_unchecked_mut(y.wrapping_add(dy) as usize % HEIGHT)
-                            .get_unchecked_mut(x.wrapping_add(dx) as usize % WIDTH)
-                    };
+                    // The compiler should be able to optimize away bounds checking
+                    let canvas_pixel = &mut self.canvas[y.wrapping_add(dy) as usize % HEIGHT]
+                        [x.wrapping_add(dx) as usize % WIDTH];
 
                     collision |= canvas_pixel.change();
                 }

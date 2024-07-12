@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = "1.0.86"
 arrayvec = "0.7.4"
 fastrand = "2.1.0"
 sdl2 = "0.37.0"
