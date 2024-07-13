@@ -3,7 +3,7 @@ use std::path::Path;
 use arrayvec::ArrayVec;
 
 use crate::{characters, HEIGHT};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 #[derive(Debug)]
 enum Relation {
@@ -84,10 +84,13 @@ impl VirtualMachine {
         self.pc -= 2;
     }
 
-    fn call(&mut self, address: u16) {
-        assert!(self.stack.len() < self.stack.capacity(), "Stack overflow");
+    fn call(&mut self, address: u16) -> Result<()> {
+        if self.stack.len() >= self.stack.capacity() {
+            bail!("Stack overflow");
+        }
         self.stack.push(self.pc);
         self.pc = address;
+        Ok(())
     }
 
     fn _return(&mut self) {
@@ -145,7 +148,7 @@ impl VirtualMachine {
     }
 
     /// Source: https://en.wikipedia.org/wiki/CHIP-8#Opcode_table
-    pub fn execute_opcode(&mut self) {
+    pub fn execute_opcode(&mut self) -> Result<()> {
         let (byte1, byte2) = (self.get_memory(self.pc), self.get_memory(self.pc + 1));
 
         let address = ((byte1 as u16 & 0x0F) << 8) | (byte2 as u16);
@@ -159,21 +162,25 @@ impl VirtualMachine {
             0x0 => match byte2 {
                 0xE0 => self.clear_canvas(),
                 0xEE => self._return(),
-                _ => self.call(address),
+                _ => self.call(address)?,
             },
             0x1 => self.jump_to(address),
-            0x2 => self.call(address),
+            0x2 => self.call(address)?,
             0x3 => self.skip_if_byte(register_x, byte2, Relation::Equal),
             0x4 => self.skip_if_byte(register_x, byte2, Relation::NotEqual),
             0x5 => {
-                assert_eq!(last_nibble, 0);
+                if last_nibble != 0 {
+                    bail!("Invalid opcode: {:02X}{:02X}", byte1, byte2);
+                }
                 self.skip_if_register(register_x, register_y, Relation::Equal);
             }
             0x6 => self.set_register(register_x, byte2),
             0x7 => self.add_byte(register_x, byte2),
-            0x8 => self.execute_math(last_nibble, register_x, register_y),
+            0x8 => self.execute_math(last_nibble, register_x, register_y)?,
             0x9 => {
-                assert_eq!(last_nibble, 0);
+                if last_nibble != 0 {
+                    bail!("Invalid opcode: {:02X}{:02X}", byte1, byte2);
+                }
                 self.skip_if_register(register_x, register_y, Relation::NotEqual);
             }
             0xA => self.i = address,
@@ -189,7 +196,7 @@ impl VirtualMachine {
             0xE => match byte2 {
                 0x9E => self.skip_if_key(register_x, Relation::Equal),
                 0xA1 => self.skip_if_key(register_x, Relation::NotEqual),
-                _ => unreachable!(),
+                _ => bail!("Invalid opcode: {:02X}{:02X}", byte1, byte2),
             },
             0xF => match byte2 {
                 0x07 => self.set_register(register_x, self.delay_timer),
@@ -215,10 +222,12 @@ impl VirtualMachine {
                 0x33 => self.set_bcd(register_x),
                 0x55 => self.dump_registers(register_x),
                 0x65 => self.load_registers(register_x),
-                _ => unreachable!(),
+                _ => bail!("Invalid opcode: {:02X}{:02X}", byte1, byte2),
             },
-            _ => unreachable!(),
+            _ => bail!("Invalid opcode: {:02X}{:02X}", byte1, byte2),
         }
+
+        Ok(())
     }
 
     fn dump_registers(&mut self, register: u8) {
@@ -246,7 +255,7 @@ impl VirtualMachine {
         self.set_memory(self.i + 2, units);
     }
 
-    fn execute_math(&mut self, operation: u8, register_x: u8, register_y: u8) {
+    fn execute_math(&mut self, operation: u8, register_x: u8, register_y: u8) -> Result<()> {
         let value_x = self.get_register(register_x);
         let value_y = self.get_register(register_y);
 
@@ -278,10 +287,12 @@ impl VirtualMachine {
                 self.set_flag(value_x >> 7);
                 value_x << 1
             }
-            _ => unreachable!(),
+            _ => bail!("Invalid operation: {:02X}", operation),
         };
 
         self.set_register(register_x, result);
+
+        Ok(())
     }
 
     pub fn clear_canvas(&mut self) {

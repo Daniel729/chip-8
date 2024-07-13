@@ -30,7 +30,7 @@ fn main() -> Result<()> {
         let start = Instant::now();
         let millions = flags.count.unwrap_or(100);
         for _ in 0..(millions * 1_000_000) {
-            machine.execute_opcode();
+            machine.execute_opcode()?;
         }
         let elapsed = start.elapsed();
         println!("{:.2}", millions as f64 / elapsed.as_secs_f64());
@@ -87,7 +87,7 @@ fn main() -> Result<()> {
         machine.sound_timer = machine.sound_timer.saturating_sub(1);
 
         for _ in 0..instructions_per_frame {
-            machine.execute_opcode();
+            machine.execute_opcode()?;
         }
 
         if machine.sound_timer > 0 {
