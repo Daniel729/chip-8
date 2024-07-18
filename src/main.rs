@@ -81,6 +81,30 @@ fn main() -> Result<()> {
 
     'main: loop {
         let now = Instant::now();
+
+        for event in event_pump.poll_iter() {
+            match event {
+                Event::Quit { .. }
+                | Event::KeyDown {
+                    keycode: Some(Keycode::Escape),
+                    ..
+                } => break 'main,
+                Event::KeyDown {
+                    scancode, repeat, ..
+                } => {
+                    if !repeat {
+                        // Set pressed key
+                        machine.pressed_key = scancode_to_chip8_code(scancode);
+                    }
+                }
+                Event::KeyUp { .. } => {
+                    // Reset pressed key
+                    machine.pressed_key = None;
+                }
+                _ => {}
+            }
+        }
+
         rects.clear();
 
         machine.delay_timer = machine.delay_timer.saturating_sub(1);
@@ -117,31 +141,7 @@ fn main() -> Result<()> {
         canvas.fill_rects(&rects).map_err(|err| anyhow!(err))?;
         canvas.present();
 
-        // Read events for the remaining frame time
-        while now.elapsed() < FRAME_TIME {
-            if let Some(event) = event_pump.wait_event_timeout(now.elapsed().as_millis() as u32) {
-                match event {
-                    Event::Quit { .. }
-                    | Event::KeyDown {
-                        keycode: Some(Keycode::Escape),
-                        ..
-                    } => break 'main,
-                    Event::KeyDown {
-                        scancode, repeat, ..
-                    } => {
-                        if !repeat {
-                            // Set pressed key
-                            machine.pressed_key = scancode_to_chip8_code(scancode);
-                        }
-                    }
-                    Event::KeyUp { .. } => {
-                        // Reset pressed key
-                        machine.pressed_key = None;
-                    }
-                    _ => {}
-                }
-            }
-        }
+        std::thread::sleep(FRAME_TIME.saturating_sub(now.elapsed()));
     }
 
     Ok(())
