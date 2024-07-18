@@ -37,7 +37,8 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Set default video driver to wayland
+    // Set default video driver to wayland for linux
+    #[cfg(target_os = "linux")]
     sdl2::hint::set("SDL_VIDEODRIVER", "wayland,x11");
 
     let sdl_context = sdl2::init().map_err(|err| anyhow!(err))?;
