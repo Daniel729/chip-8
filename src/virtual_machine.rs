@@ -3,7 +3,7 @@ use std::path::Path;
 use arrayvec::ArrayVec;
 
 use crate::{characters, HEIGHT};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 
 #[derive(Debug)]
 enum Relation {
@@ -11,31 +11,75 @@ enum Relation {
     NotEqual,
 }
 
+#[repr(C)]
 pub struct VirtualMachine {
-    memory: [u8; 0x1000],
-    stack: ArrayVec<u16, 100>,
+    pub instructions: Box<[fn(&mut VirtualMachine); 16]>,
+    pub canvas: Box<[u64; HEIGHT]>,
+    memory: Box<[u8; 0x1000]>,
+    stack: Box<ArrayVec<u16, 100>>,
     registers: [u8; 16],
     i: u16,
     pc: u16,
+    byte1: u8,
+    byte2: u8,
     pub delay_timer: u8,
     pub sound_timer: u8,
     pub pressed_key: Option<u8>,
-    pub canvas: [u64; HEIGHT],
+    pub instruction_count: u64,
+}
+
+macro_rules! generate_functions {
+    ($($name:ident => $func:block),*) => { $(unhygienic2::unhygienic! {
+        fn $name(&mut self) {
+            self.pc += 2;
+            self.instruction_count += 1;
+            let address = ((self.byte1 as u16 & 0x0F) << 8) | (self.byte2 as u16);
+            let register_x = self.byte1 & 0x0F;
+            let register_y = self.byte2 >> 4;
+            let last_nibble = self.byte2 & 0x0F;
+            $func;
+            self.byte1 = self.get_memory(self.pc);
+            self.byte2 = self.get_memory(self.pc + 1);
+            let next = (self.byte1 & 0xF0) >> 4;
+            (self.instructions[next as usize])(self);
+        }
+    })*};
 }
 
 impl VirtualMachine {
     pub fn new(path: &Path) -> Result<Self> {
         let rom = std::fs::read(path).with_context(|| format!("Failed to read ROM: {:?}", path))?;
         let mut machine = Self {
-            memory: [0; 0x1000],
-            stack: ArrayVec::new(),
+            memory: Box::new([0; 0x1000]),
+            stack: Box::new(ArrayVec::new()),
             registers: [0; 16],
             i: 0x200,
             pc: 0x200,
+            byte1: 0,
+            byte2: 0,
             delay_timer: 0,
             sound_timer: 0,
             pressed_key: None,
-            canvas: [0; HEIGHT],
+            canvas: Box::new([0; HEIGHT]),
+            instruction_count: 0,
+            instructions: Box::new([
+                VirtualMachine::op_0x0,
+                VirtualMachine::op_0x1,
+                VirtualMachine::op_0x2,
+                VirtualMachine::op_0x3,
+                VirtualMachine::op_0x4,
+                VirtualMachine::op_0x5,
+                VirtualMachine::op_0x6,
+                VirtualMachine::op_0x7,
+                VirtualMachine::op_0x8,
+                VirtualMachine::op_0x9,
+                VirtualMachine::op_0xA,
+                VirtualMachine::op_0xB,
+                VirtualMachine::op_0xC,
+                VirtualMachine::op_0xD,
+                VirtualMachine::op_0xE,
+                VirtualMachine::op_0xF,
+            ]),
         };
 
         // Game ROM starts at 0x200
@@ -84,13 +128,9 @@ impl VirtualMachine {
         self.pc -= 2;
     }
 
-    fn call(&mut self, address: u16) -> Result<()> {
-        if self.stack.len() >= self.stack.capacity() {
-            bail!("Stack overflow");
-        }
+    fn call(&mut self, address: u16) {
         self.stack.push(self.pc);
         self.pc = address;
-        Ok(())
     }
 
     fn _return(&mut self) {
@@ -147,89 +187,6 @@ impl VirtualMachine {
         self.set_register(register, value.wrapping_add(byte));
     }
 
-    /// Source: https://en.wikipedia.org/wiki/CHIP-8#Opcode_table
-    pub fn execute_opcode(&mut self) -> Result<()> {
-        let (byte1, byte2) = (self.get_memory(self.pc), self.get_memory(self.pc + 1));
-
-        let address = ((byte1 as u16 & 0x0F) << 8) | (byte2 as u16);
-        let register_x = byte1 & 0x0F;
-        let register_y = byte2 >> 4;
-        let last_nibble = byte2 & 0x0F;
-
-        self.inc_pc();
-
-        match (byte1 & 0xF0) >> 4 {
-            0x0 => match byte2 {
-                0xE0 => self.clear_canvas(),
-                0xEE => self._return(),
-                _ => self.call(address)?,
-            },
-            0x1 => self.jump_to(address),
-            0x2 => self.call(address)?,
-            0x3 => self.skip_if_byte(register_x, byte2, Relation::Equal),
-            0x4 => self.skip_if_byte(register_x, byte2, Relation::NotEqual),
-            0x5 => {
-                if last_nibble != 0 {
-                    bail!("Invalid opcode: {:02X}{:02X}", byte1, byte2);
-                }
-                self.skip_if_register(register_x, register_y, Relation::Equal);
-            }
-            0x6 => self.set_register(register_x, byte2),
-            0x7 => self.add_byte(register_x, byte2),
-            0x8 => self.execute_math(last_nibble, register_x, register_y)?,
-            0x9 => {
-                if last_nibble != 0 {
-                    bail!("Invalid opcode: {:02X}{:02X}", byte1, byte2);
-                }
-                self.skip_if_register(register_x, register_y, Relation::NotEqual);
-            }
-            0xA => self.i = address,
-            0xB => self.update_pc(address),
-            0xC => self.set_register(register_x, fastrand::u8(..) & byte2),
-            0xD => {
-                let x = self.get_register(register_x);
-                let y = self.get_register(register_y);
-                let height = last_nibble;
-
-                self.draw(x, y, height);
-            }
-            0xE => match byte2 {
-                0x9E => self.skip_if_key(register_x, Relation::Equal),
-                0xA1 => self.skip_if_key(register_x, Relation::NotEqual),
-                _ => bail!("Invalid opcode: {:02X}{:02X}", byte1, byte2),
-            },
-            0xF => match byte2 {
-                0x07 => self.set_register(register_x, self.delay_timer),
-                0x0A => {
-                    let value = self.pressed_key.take();
-
-                    if let Some(code) = value {
-                        self.set_register(register_x, code);
-                    } else {
-                        self.dec_pc();
-                    }
-                }
-                0x15 => self.delay_timer = self.get_register(register_x),
-                0x18 => {
-                    self.sound_timer = self.get_register(register_x);
-                    // SDL doesnt alway play audio if it only lasts for 1 frame
-                    if self.sound_timer < 2 {
-                        self.sound_timer = 2;
-                    }
-                }
-                0x1E => self.i += self.get_register(register_x) as u16,
-                0x29 => self.i = 0x50 + self.get_register(register_x) as u16 * 5,
-                0x33 => self.set_bcd(register_x),
-                0x55 => self.dump_registers(register_x),
-                0x65 => self.load_registers(register_x),
-                _ => bail!("Invalid opcode: {:02X}{:02X}", byte1, byte2),
-            },
-            _ => bail!("Invalid opcode: {:02X}{:02X}", byte1, byte2),
-        }
-
-        Ok(())
-    }
-
     fn dump_registers(&mut self, register: u8) {
         for index in 0u8..=register {
             self.set_memory(self.i + index as u16, self.get_register(index));
@@ -255,7 +212,7 @@ impl VirtualMachine {
         self.set_memory(self.i + 2, units);
     }
 
-    fn execute_math(&mut self, operation: u8, register_x: u8, register_y: u8) -> Result<()> {
+    fn execute_math(&mut self, operation: u8, register_x: u8, register_y: u8) {
         let value_x = self.get_register(register_x);
         let value_y = self.get_register(register_y);
 
@@ -287,12 +244,10 @@ impl VirtualMachine {
                 self.set_flag(value_x >> 7);
                 value_x << 1
             }
-            _ => bail!("Invalid operation: {:02X}", operation),
+            _ => panic!(),
         };
 
         self.set_register(register_x, result);
-
-        Ok(())
     }
 
     pub fn clear_canvas(&mut self) {
@@ -317,4 +272,99 @@ impl VirtualMachine {
 
         self.set_flag(collision as u8);
     }
+
+    /// Source: https://en.wikipedia.org/wiki/CHIP-8#Opcode_table
+    pub fn entry(&mut self) {
+        self.byte1 = self.get_memory(self.pc);
+        self.byte2 = self.get_memory(self.pc + 1);
+        let next = (self.byte1 & 0xF0) >> 4;
+        (self.instructions[next as usize])(self);
+    }
+
+    generate_functions![
+        op_0x0 => {
+            match self.byte2 {
+                0xE0 => self.clear_canvas(),
+                0xEE => self._return(),
+                _ => self.call(address),
+            }
+        },
+        op_0x1 => {
+            self.jump_to(address);
+        },
+        op_0x2 => {
+            self.call(address);
+        },
+        op_0x3 => {
+            self.skip_if_byte(register_x, self.byte2, Relation::Equal);
+        },
+        op_0x4 => {
+            self.skip_if_byte(register_x, self.byte2, Relation::NotEqual);
+        },
+        op_0x5 => {
+            self.skip_if_register(register_x, register_y, Relation::Equal);
+        },
+        op_0x6 => {
+            self.set_register(register_x, self.byte2);
+        },
+        op_0x7 => {
+            self.add_byte(register_x, self.byte2);
+        },
+        op_0x8 => {
+            self.execute_math(last_nibble, register_x, register_y);
+        },
+        op_0x9 => {
+            self.skip_if_register(register_x, register_y, Relation::NotEqual);
+        },
+        op_0xA => {
+            self.i = address;
+        },
+        op_0xB => {
+            self.update_pc(address);
+        },
+        op_0xC => {
+            self.set_register(register_x, fastrand::u8(..) & self.byte2);
+        },
+        op_0xD => {
+            let x = self.get_register(register_x);
+            let y = self.get_register(register_y);
+            let height = last_nibble;
+            self.draw(x, y, height);
+        },
+        op_0xE => {
+            match self.byte2 {
+                0x9E => self.skip_if_key(register_x, Relation::Equal),
+                0xA1 => self.skip_if_key(register_x, Relation::NotEqual),
+                _ => panic!(),
+            }
+        },
+        op_0xF => {
+            match self.byte2 {
+                0x07 => self.set_register(register_x, self.delay_timer),
+                0x0A => {
+                    let value = self.pressed_key.take();
+
+                    if let Some(code) = value {
+                        self.set_register(register_x, code);
+                    } else {
+                        self.dec_pc();
+                    }
+                }
+                0x15 => self.delay_timer = self.get_register(register_x),
+                0x18 => {
+                    self.sound_timer = self.get_register(register_x);
+                    // SDL doesnt alway play audio if it only lasts for 1 frame
+                    if self.sound_timer < 2 {
+                        self.sound_timer = 2;
+                    }
+                }
+                0x1E => self.i += self.get_register(register_x) as u16,
+                0x29 => self.i = 0x50 + self.get_register(register_x) as u16 * 5,
+                0x33 => self.set_bcd(register_x),
+                0x55 => self.dump_registers(register_x),
+                0x65 => self.load_registers(register_x),
+                _ => panic!(),
+            }
+        }
+    ];
 }
